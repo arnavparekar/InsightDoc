@@ -3,7 +3,8 @@ import time
 import logging
 import asyncio
 from urllib.parse import urlsplit
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException, Body, Depends, status
+from fastapi.security import HTTPBearer
 from pydantic import BaseModel, Field
 from typing import List
 import requests
@@ -17,7 +18,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import Runnable
 
 # --- Configuration ---
-os.environ["GROQ_API_KEY"] = "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"
+os.environ["GROQ_API_KEY"] = "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"
 # Silences the tokenizer parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -31,6 +32,19 @@ app = FastAPI(
     description="An LLM-powered system for contextual document analysis.",
     version="1.0.0",
 )
+
+# --- Security ---
+security = HTTPBearer()
+EXPECTED_TOKEN = "2a689d9dd2262c6f52836c0e0dbaf8f6a06df36e67bebc4a618d0afabcbbd50f"
+
+async def verify_token(credentials: str = Depends(security)):
+    if credentials.credentials != EXPECTED_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return credentials
 
 # --- Pydantic Models for API ---
 class HackRxRunRequest(BaseModel):
@@ -76,7 +90,7 @@ async def process_document_and_query(doc_url: str, questions: List[str]):
         llm = ChatGroq(model_name="llama3-8b-8192")
 
         # 5. Define RAG Chain
-        prompt_template = """Based *only* on the following context, provide a clear and concise answer to the question. Do not mention the context or the documents in your answer. Synthesize the information into a final, clean response.
+        prompt_template = """Based *only* on the following context, provide a clear and concise answer to the question. Do not mention the context or the documents in your answer. Synthesize the information into a final, clean response. If the answer is one word long then provide a short one line sentence about it.
 
         CONTEXT:
         {context}
@@ -114,10 +128,16 @@ async def process_document_and_query(doc_url: str, questions: List[str]):
 
 # --- API Endpoint ---
 @app.post("/api/v1/hackrx/run", response_model=HackRxRunResponse)
-async def hackrx_run(request: HackRxRunRequest = Body(...)):
+async def hackrx_run(request: HackRxRunRequest = Body(...), _ = Depends(verify_token)):
     """
     Run the intelligent query-retrieval system.
     """
+    logger.info("--- New Request Received ---")
+    logger.info(f"Document URL: {request.documents}")
+    logger.info("Questions:")
+    for i, question in enumerate(request.questions, 1):
+        logger.info(f"  {i}. {question}")
+
     start_time = time.time()
 
     answers = await process_document_and_query(request.documents, request.questions)
