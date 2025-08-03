@@ -1,7 +1,7 @@
-
 import os
 import time
 import logging
+import asyncio
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Body
 from pydantic import BaseModel, Field
@@ -14,10 +14,12 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import Runnable
 
 # --- Configuration ---
 os.environ["GROQ_API_KEY"] = "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"
+# Silences the tokenizer parallelism warning
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO)
@@ -42,9 +44,13 @@ class HackRxRunResponse(BaseModel):
     answers: List[str]
 
 # --- Core Logic ---
-def process_document_and_query(doc_url: str, questions: List[str]):
+async def process_single_question(question: str, retriever, rag_chain: Runnable):
+    """Asynchronously processes a single question against the RAG chain."""
+    return await rag_chain.ainvoke(question)
+
+async def process_document_and_query(doc_url: str, questions: List[str]):
     """
-    Processes a document from a URL, creates a vector store, and answers questions.
+    Processes a document from a URL, creates a vector store, and answers questions in parallel.
     """
     try:
         # 1. Load Document
@@ -64,40 +70,40 @@ def process_document_and_query(doc_url: str, questions: List[str]):
         # 3. Create Embeddings and Vector Store
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         vectorstore = FAISS.from_documents(documents=splits, embedding=embeddings)
+        retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 5})
 
         # 4. Initialize LLM
         llm = ChatGroq(model_name="llama3-8b-8192")
 
-        # 5. Process Questions
-        answers = []
-        for question in questions:
-            retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 5})
+        # 5. Define RAG Chain
+        prompt_template = """Based *only* on the following context, provide a clear and concise answer to the question. Do not mention the context or the documents in your answer. Synthesize the information into a final, clean response.
 
-            # Refined prompt for concise, direct answers
-            prompt_template = """Based *only* on the following context, provide a clear and concise answer to the question. Do not mention the context or the documents in your answer. Synthesize the information into a final, clean response.
+        CONTEXT:
+        {context}
 
-            CONTEXT:
-            {context}
+        QUESTION:
+        {question}
 
-            QUESTION:
-            {question}
+        ANSWER:"""
+        prompt = ChatPromptTemplate.from_template(prompt_template)
 
-            ANSWER:"""
-            prompt = ChatPromptTemplate.from_template(prompt_template)
+        def format_docs(docs):
+            return "\n\n".join(doc.page_content for doc in docs)
 
-            rag_chain = (
-                {"context": retriever, "question": RunnablePassthrough()}
-                | prompt
-                | llm
-                | StrOutputParser()
-            )
+        rag_chain = (
+            {"context": retriever | format_docs, "question": lambda x: x}
+            | prompt
+            | llm
+            | StrOutputParser()
+        )
 
-            answer = rag_chain.invoke(question)
-            answers.append(answer.strip())
-
+        # 6. Process Questions in Parallel
+        tasks = [rag_chain.ainvoke(q) for q in questions]
+        answers = await asyncio.gather(*tasks)
+        
         os.remove(temp_pdf_path)
 
-        return answers
+        return [ans.replace('\n', ' ').replace('*', '').strip() for ans in answers]
 
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=400, detail=f"Failed to download document: {e}")
@@ -114,16 +120,14 @@ async def hackrx_run(request: HackRxRunRequest = Body(...)):
     """
     start_time = time.time()
 
-    answers = process_document_and_query(request.documents, request.questions)
+    answers = await process_document_and_query(request.documents, request.questions)
 
     end_time = time.time()
     time_taken = end_time - start_time
 
-    # Log details to the console instead of returning them in the response
     cleaned_url = urlsplit(request.documents)._replace(query=None, fragment=None).geturl()
     logger.info(f"Request processed successfully in {time_taken:.2f} seconds.")
     logger.info(f"Document URL: {cleaned_url}")
-    logger.info(f"Questions: {request.questions}")
 
     return HackRxRunResponse(answers=answers)
 
