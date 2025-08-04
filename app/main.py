@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import asyncio
+import uuid
 from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Body, Depends, status
 from fastapi.security import HTTPBearer
@@ -18,7 +19,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import Runnable
 
 # --- Configuration ---
-os.environ["GROQ_API_KEY"] = "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"
+os.environ["GROQ_API_KEY"] = "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"
 # Silences the tokenizer parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -70,7 +71,7 @@ async def process_document_and_query(doc_url: str, questions: List[str]):
         # 1. Load Document
         response = requests.get(doc_url)
         response.raise_for_status()
-        temp_pdf_path = "temp_document.pdf"
+        temp_pdf_path = f"temp_document_{uuid.uuid4()}.pdf"
         with open(temp_pdf_path, "wb") as f:
             f.write(response.content)
 
@@ -90,7 +91,7 @@ async def process_document_and_query(doc_url: str, questions: List[str]):
         llm = ChatGroq(model_name="llama3-8b-8192")
 
         # 5. Define RAG Chain
-        prompt_template = """Based *only* on the following context, provide a clear and concise answer to the question. Do not mention the context or the documents in your answer. Synthesize the information into a final, clean response. If the answer is one word long then provide a short one line sentence about it.
+        prompt_template = """Based *only* on the following context, provide a clear and concise answer to the question. Do not mention the context or the documents in your answer. Synthesize the information into a final, clean response.provide a clear and concise answer to the question. IMPORTANT: Your answer must be a single, complete sentence. For example, if the answer is a number even then respond with complete sentence.
 
         CONTEXT:
         {context}
